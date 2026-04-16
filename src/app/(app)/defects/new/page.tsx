@@ -9,6 +9,21 @@ import { createDefect, getNextSerialNumber } from '@/lib/firebase/firestore'
 import { ChevronRight } from 'lucide-react'
 import type { DefectSeverity, DefectStatus } from '@/types'
 
+function firestoreErrorMessage(err: any): string {
+  const code: string = err?.code ?? ''
+  if (code === 'permission-denied')    return 'שגיאת הרשאות – בדוק את חוקי Firestore'
+  if (code === 'unavailable')          return 'שרת Firebase אינו זמין – בדוק חיבור לאינטרנט'
+  if (code === 'invalid-argument')     return `נתון שגוי: ${err?.message ?? ''}`
+  if (code === 'not-found')            return 'הפרויקט לא נמצא – נסה לרענן את הדף'
+  if (err?.message)                    return err.message
+  return 'שגיאה לא ידועה – נסה שוב'
+}
+
+function newUuid(): string {
+  try { return crypto.randomUUID() } catch { /* fallback */ }
+  return Date.now().toString(36) + Math.random().toString(36).slice(2)
+}
+
 export default function NewDefectPage() {
   const { project } = useProject()
   const { user }    = useAuth()
@@ -34,6 +49,7 @@ export default function NewDefectPage() {
     try {
       const serialNumber = await getNextSerialNumber(project.id)
       const now = new Date().toISOString()
+
       await createDefect(project.id, {
         projectId:          project.id,
         serialNumber,
@@ -43,13 +59,14 @@ export default function NewDefectPage() {
         sourceType:         'self',
         severity,
         status,
-        estimatedCost:      estimatedCost ? Number(estimatedCost) : undefined,
+        // Omit estimatedCost entirely when empty — Firestore rejects undefined values
+        ...(estimatedCost ? { estimatedCost: Number(estimatedCost) } : {}),
         contractorPosition: contractorPosition.trim(),
         contractorStatus:   'pending',
         tenantPosition:     tenantPosition.trim(),
         images:             [],
         timeline:           [{
-          id:        crypto.randomUUID(),
+          id:        newUuid(),
           date:      now,
           event:     'ליקוי נוסף ידנית',
           actorName: user.displayName || user.email || '',
@@ -58,8 +75,8 @@ export default function NewDefectPage() {
         updatedAt: now,
       })
       router.push('/defects')
-    } catch {
-      setError('שגיאה בשמירת הליקוי – נסה שוב')
+    } catch (err: any) {
+      setError(firestoreErrorMessage(err))
     } finally {
       setLoading(false)
     }
@@ -70,7 +87,6 @@ export default function NewDefectPage() {
 
   return (
     <div className="p-6 max-w-2xl mx-auto">
-      {/* Back */}
       <Link href="/defects" className="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700 mb-6">
         <ChevronRight className="w-4 h-4" /> חזרה לליקויים
       </Link>
@@ -79,37 +95,28 @@ export default function NewDefectPage() {
 
       <form onSubmit={handleSubmit} className="space-y-5 bg-white rounded-xl border border-gray-200 p-6">
 
-        {/* Description */}
         <div>
           <label className={labelCls}>תיאור הליקוי <span className="text-red-500">*</span></label>
           <textarea
-            value={description}
-            onChange={e => setDescription(e.target.value)}
-            required rows={3}
-            className={inputCls + ' resize-none'}
+            value={description} onChange={e => setDescription(e.target.value)}
+            required rows={3} className={inputCls + ' resize-none'}
             placeholder="תאר את הליקוי בפירוט..."
           />
         </div>
 
-        {/* Location + Section */}
         <div className="grid grid-cols-2 gap-4">
           <div>
             <label className={labelCls}>מיקום <span className="text-red-500">*</span></label>
-            <input
-              type="text" value={location} onChange={e => setLocation(e.target.value)}
-              required className={inputCls} placeholder="מטבח, חדר שינה..."
-            />
+            <input type="text" value={location} onChange={e => setLocation(e.target.value)}
+              required className={inputCls} placeholder="מטבח, חדר שינה..." />
           </div>
           <div>
             <label className={labelCls}>סעיף</label>
-            <input
-              type="text" value={section} onChange={e => setSection(e.target.value)}
-              className={inputCls} placeholder="1.1" dir="ltr"
-            />
+            <input type="text" value={section} onChange={e => setSection(e.target.value)}
+              className={inputCls} placeholder="1.1" dir="ltr" />
           </div>
         </div>
 
-        {/* Severity + Status */}
         <div className="grid grid-cols-2 gap-4">
           <div>
             <label className={labelCls}>חומרה <span className="text-red-500">*</span></label>
@@ -130,53 +137,41 @@ export default function NewDefectPage() {
           </div>
         </div>
 
-        {/* Estimated cost */}
         <div>
           <label className={labelCls}>עלות מוערכת (₪)</label>
-          <input
-            type="number" min="0" value={estimatedCost}
+          <input type="number" min="0" value={estimatedCost}
             onChange={e => setEstimatedCost(e.target.value)}
-            className={inputCls} placeholder="0" dir="ltr"
-          />
+            className={inputCls} placeholder="השאר ריק אם לא ידוע" dir="ltr" />
         </div>
 
-        {/* Contractor position */}
         <div>
           <label className={labelCls}>עמדת הקבלן</label>
-          <textarea
-            value={contractorPosition}
-            onChange={e => setContractorPosition(e.target.value)}
+          <textarea value={contractorPosition} onChange={e => setContractorPosition(e.target.value)}
             rows={2} className={inputCls + ' resize-none'}
-            placeholder="מה ענה הקבלן על ליקוי זה..."
-          />
+            placeholder="מה ענה הקבלן על ליקוי זה..." />
         </div>
 
-        {/* Tenant position */}
         <div>
           <label className={labelCls}>עמדתי / הערות</label>
-          <textarea
-            value={tenantPosition}
-            onChange={e => setTenantPosition(e.target.value)}
+          <textarea value={tenantPosition} onChange={e => setTenantPosition(e.target.value)}
             rows={2} className={inputCls + ' resize-none'}
-            placeholder="הערות אישיות, מעקב, פרטים נוספים..."
-          />
+            placeholder="הערות אישיות, מעקב, פרטים נוספים..." />
         </div>
 
         {error && (
-          <p className="text-red-600 text-sm bg-red-50 border border-red-200 rounded-lg px-3 py-2">{error}</p>
+          <div className="text-red-700 text-sm bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+            <p className="font-medium">שגיאה בשמירת הליקוי</p>
+            <p className="mt-0.5 text-xs">{error}</p>
+          </div>
         )}
 
         <div className="flex gap-3 pt-1">
-          <button
-            type="submit" disabled={loading}
-            className="flex-1 bg-blue-600 text-white py-2.5 rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
-          >
+          <button type="submit" disabled={loading}
+            className="flex-1 bg-blue-600 text-white py-2.5 rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors">
             {loading ? 'שומר...' : 'שמור ליקוי'}
           </button>
-          <Link
-            href="/defects"
-            className="px-5 py-2.5 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50 transition-colors font-medium"
-          >
+          <Link href="/defects"
+            className="px-5 py-2.5 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50 transition-colors font-medium">
             ביטול
           </Link>
         </div>

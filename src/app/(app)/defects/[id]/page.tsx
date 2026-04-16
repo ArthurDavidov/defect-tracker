@@ -20,6 +20,21 @@ import {
 } from '@/types'
 import { classifyContractorResponse } from '@/lib/parsers/sellerPdf'
 
+function firestoreErrorMessage(err: any): string {
+  const code: string = err?.code ?? ''
+  if (code === 'permission-denied') return 'שגיאת הרשאות – בדוק את חוקי Firestore'
+  if (code === 'unavailable')       return 'שרת Firebase אינו זמין – בדוק חיבור לאינטרנט'
+  if (code === 'invalid-argument')  return `נתון שגוי: ${err?.message ?? ''}`
+  if (code === 'not-found')         return 'הליקוי לא נמצא'
+  if (err?.message)                 return err.message
+  return 'שגיאה לא ידועה – נסה שוב'
+}
+
+function newUuid(): string {
+  try { return crypto.randomUUID() } catch { /* fallback */ }
+  return Date.now().toString(36) + Math.random().toString(36).slice(2)
+}
+
 export default function DefectDetailPage() {
   const { id }      = useParams<{ id: string }>()
   const { project } = useProject()
@@ -79,7 +94,8 @@ export default function DefectDetailPage() {
         section:            section.trim(),
         severity,
         status,
-        estimatedCost:      estimatedCost ? Number(estimatedCost) : undefined,
+        // Omit estimatedCost entirely when empty — Firestore rejects undefined
+        ...(estimatedCost ? { estimatedCost: Number(estimatedCost) } : {}),
         contractorPosition: contractorPosition.trim(),
         contractorStatus:   newContractorStatus,
         tenantPosition:     tenantPosition.trim(),
@@ -88,7 +104,7 @@ export default function DefectDetailPage() {
       // Add timeline entry if status changed
       const timelineUpdate = status !== defect.status
         ? [...defect.timeline, {
-            id:        crypto.randomUUID(),
+            id:        newUuid(),
             date:      now,
             event:     `סטטוס שונה: ${STATUS_LABELS[defect.status]} ← ${STATUS_LABELS[status]}`,
             actorName: user?.displayName || user?.email || '',
@@ -98,8 +114,8 @@ export default function DefectDetailPage() {
       await updateDefect(project.id, defect.id, { ...changes, timeline: timelineUpdate })
       setDefect({ ...defect, ...changes, timeline: timelineUpdate, updatedAt: now })
       setEditing(false)
-    } catch {
-      setError('שגיאה בשמירה – נסה שוב')
+    } catch (err: any) {
+      setError(firestoreErrorMessage(err))
     } finally {
       setSaving(false)
     }
@@ -110,8 +126,8 @@ export default function DefectDetailPage() {
     try {
       await deleteDefect(project.id, defect.id)
       router.push('/defects')
-    } catch {
-      setError('שגיאה במחיקה')
+    } catch (err: any) {
+      setError(firestoreErrorMessage(err))
     }
   }
 
@@ -119,7 +135,7 @@ export default function DefectDetailPage() {
     if (!project || !defect || newStatus === defect.status) return
     const now = new Date().toISOString()
     const timeline = [...defect.timeline, {
-      id:        crypto.randomUUID(),
+      id:        newUuid(),
       date:      now,
       event:     `סטטוס שונה ל: ${STATUS_LABELS[newStatus]}`,
       actorName: user?.displayName || user?.email || '',
@@ -224,7 +240,10 @@ export default function DefectDetailPage() {
       )}
 
       {error && (
-        <p className="text-red-600 text-sm bg-red-50 border border-red-200 rounded-lg px-3 py-2">{error}</p>
+        <div className="text-red-700 text-sm bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+          <p className="font-medium">שגיאה</p>
+          <p className="mt-0.5 text-xs">{error}</p>
+        </div>
       )}
 
       {/* Details grid */}
