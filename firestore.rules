@@ -1,17 +1,17 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /projects/{projectId} {
-      // Any signed-in user can read/write projects.
-      // Ownership is enforced in the app, not the rules, for simplicity.
-      allow read, write: if request.auth != null;
+
+    // Project document ID equals the owner's uid — simple, direct, no queries.
+    match /projects/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
 
       match /defects/{defectId} {
-        allow read, write: if request.auth != null;
+        allow read, write: if request.auth != null && request.auth.uid == userId;
       }
 
       match /documents/{docId} {
-        allow read, write: if request.auth != null;
+        allow read, write: if request.auth != null && request.auth.uid == userId;
       }
     }
   }

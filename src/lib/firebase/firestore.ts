@@ -17,16 +17,16 @@ export async function getProject(projectId: string) {
   return snap.exists() ? { id: snap.id, ...snap.data() } as Project : null
 }
 
+// Direct read by userId — the project doc ID equals the owner's uid.
+// This avoids collection queries which are unreliable with Firestore rules.
 export async function getUserProject(userId: string) {
-  const q = query(projectsCol(), where('ownerId', '==', userId))
-  const snap = await getDocs(q)
-  if (snap.empty) return null
-  const d = snap.docs[0]
-  return { id: d.id, ...d.data() } as Project
+  const snap = await getDoc(doc(db, 'projects', userId))
+  return snap.exists() ? { id: snap.id, ...snap.data() } as Project : null
 }
 
+// projectId MUST equal data.ownerId (user's uid) so getUserProject can find it.
 export async function createProject(data: Omit<Project, 'id' | 'createdAt'>) {
-  const ref = doc(projectsCol())
+  const ref = doc(db, 'projects', data.ownerId)   // use uid as doc ID
   await setDoc(ref, { ...data, createdAt: new Date().toISOString() })
   return ref.id
 }
