@@ -35,7 +35,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!loadingProject && !loading && user && !project &&
         pathname !== '/settings') {
-      router.push('/register')
+      router.push('/setup')
     }
   }, [project, loadingProject, loading, user, pathname, router])
 
