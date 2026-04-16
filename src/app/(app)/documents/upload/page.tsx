@@ -45,7 +45,7 @@ export default function UploadPage() {
 
       if (file.name.toLowerCase().endsWith('.pdf')) {
         // PDF parsed client-side — pdfjs-dist requires browser APIs (DOMMatrix etc.)
-        parsed = await parsePdfInBrowser(file)
+        parsed = await parsePdfInBrowser(file, docType)
       } else if (file.name.toLowerCase().endsWith('.docx')) {
         // DOCX parsed server-side via mammoth
         const form = new FormData()
@@ -252,9 +252,16 @@ export default function UploadPage() {
                   <th className="w-10 px-4 py-3"></th>
                   <th className="px-4 py-3 text-right font-medium text-gray-600 text-xs">סעיף</th>
                   <th className="px-4 py-3 text-right font-medium text-gray-600 text-xs">מיקום</th>
-                  <th className="px-4 py-3 text-right font-medium text-gray-600 text-xs min-w-52">תיאור</th>
-                  <th className="px-4 py-3 text-right font-medium text-gray-600 text-xs">עמדת קבלן</th>
-                  <th className="px-4 py-3 text-right font-medium text-gray-600 text-xs">סטטוס</th>
+                  <th className="px-4 py-3 text-right font-medium text-gray-600 text-xs min-w-52">ליקוי</th>
+                  {docType !== 'seller_reply' && (
+                    <th className="px-4 py-3 text-right font-medium text-gray-600 text-xs">עלות מוערכת</th>
+                  )}
+                  {docType === 'seller_reply' && (
+                    <>
+                      <th className="px-4 py-3 text-right font-medium text-gray-600 text-xs">עמדת קבלן</th>
+                      <th className="px-4 py-3 text-right font-medium text-gray-600 text-xs">סטטוס</th>
+                    </>
+                  )}
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
@@ -283,14 +290,23 @@ export default function UploadPage() {
                         className="w-full text-xs border-0 bg-transparent focus:bg-white focus:border focus:border-gray-300 focus:rounded px-1 py-0.5 text-gray-700 resize-none"
                       />
                     </td>
-                    <td className="px-4 py-3 text-xs text-gray-500 max-w-48">
-                      <p className="line-clamp-2">{item.contractorPosition}</p>
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${CONTRACTOR_STATUS_COLORS[item.contractorStatus ?? 'pending']}`}>
-                        {CONTRACTOR_STATUS_LABELS[item.contractorStatus ?? 'pending']}
-                      </span>
-                    </td>
+                    {docType !== 'seller_reply' && (
+                      <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">
+                        {item.estimatedCost != null ? `₪${item.estimatedCost.toLocaleString()}` : '—'}
+                      </td>
+                    )}
+                    {docType === 'seller_reply' && (
+                      <>
+                        <td className="px-4 py-3 text-xs text-gray-500 max-w-48">
+                          <p className="line-clamp-2">{item.contractorPosition}</p>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${CONTRACTOR_STATUS_COLORS[item.contractorStatus ?? 'pending']}`}>
+                            {CONTRACTOR_STATUS_LABELS[item.contractorStatus ?? 'pending']}
+                          </span>
+                        </td>
+                      </>
+                    )}
                   </tr>
                 ))}
               </tbody>

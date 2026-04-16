@@ -1,14 +1,20 @@
 /**
  * Client-side PDF text extractor.
  * Must only be imported in browser components — pdfjs-dist requires DOMMatrix
- * and other browser APIs that are not available in Node.js API routes.
+ * and other browser APIs unavailable in Node.js.
  */
-import type { ParsedItem, ContractorPositionClass } from '@/types'
+import type { ParsedItem, ContractorPositionClass, DocumentType } from '@/types'
+
+// ─── RTL correction ───────────────────────────────────────────────────────────
+// Only needed for seller PDFs whose generator stores each character reversed.
+// Inspection report PDFs are standard — pdfjs-dist already returns correct text.
 
 function fixRtl(text: string): string {
   if (!text) return ''
   return text.split('\n').map(l => l.split('').reverse().join('')).reverse().join(' ').trim()
 }
+
+// ─── Contractor classifier ────────────────────────────────────────────────────
 
 function classifyContractor(text: string): ContractorPositionClass {
   if (!text) return 'pending'
@@ -20,10 +26,29 @@ function classifyContractor(text: string): ContractorPositionClass {
   return 'pending'
 }
 
-export async function parsePdfInBrowser(file: File): Promise<ParsedItem[]> {
+// ─── Column classifier ────────────────────────────────────────────────────────
+
+function isCostOrQuantity(s: string): boolean {
+  const clean = s.replace(/[₪,\s]/g, '')
+  // Pure number (quantity like 1, 2, 3) or currency amount
+  return /^\d+(\.\d+)?$/.test(clean) || s.includes('₪')
+}
+
+function extractCost(parts: string[]): number | undefined {
+  const costStr = parts.find(p => p.includes('₪') || /^\d{3,}([,.\d]*)$/.test(p.replace(/[₪,\s]/g, '')))
+  if (!costStr) return undefined
+  const num = parseFloat(costStr.replace(/[₪,\s]/g, ''))
+  return isNaN(num) ? undefined : num
+}
+
+// ─── Main export ──────────────────────────────────────────────────────────────
+
+export async function parsePdfInBrowser(
+  file: File,
+  docType: DocumentType
+): Promise<ParsedItem[]> {
   const pdfjsLib = await import('pdfjs-dist')
 
-  // Use CDN worker so we don't need to bundle it
   pdfjsLib.GlobalWorkerOptions.workerSrc =
     `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`
 
@@ -31,55 +56,95 @@ export async function parsePdfInBrowser(file: File): Promise<ParsedItem[]> {
   const pdf     = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise
   const results: ParsedItem[] = []
 
+  // Seller reply PDFs have character-reversed Hebrew text; inspection reports do not.
+  const isSellerPdf = docType === 'seller_reply'
+
+  const processText = (raw: string) => isSellerPdf ? fixRtl(raw) : raw.trim()
+
   for (let p = 1; p <= pdf.numPages; p++) {
     const page    = await pdf.getPage(p)
     const content = await page.getTextContent()
 
     // Group text items by Y coordinate (±6 pt tolerance)
     const byY = new Map<number, { str: string; x: number }[]>()
-    for (const raw of content.items as { str: string; transform: number[] }[]) {
-      const y = Math.round(raw.transform[5] / 6) * 6
-      const x = raw.transform[4]
+    for (const item of content.items as { str: string; transform: number[] }[]) {
+      if (!item.str.trim()) continue
+      const y = Math.round(item.transform[5] / 6) * 6
+      const x = item.transform[4]
       if (!byY.has(y)) byY.set(y, [])
-      byY.get(y)!.push({ str: raw.str, x })
+      byY.get(y)!.push({ str: item.str, x })
     }
 
-    const sortedYs = [...byY.keys()].sort((a, b) => b - a)  // top → bottom
+    const sortedYs = [...byY.keys()].sort((a, b) => b - a)
 
     for (const y of sortedYs) {
-      const cells = byY.get(y)!.sort((a, b) => b.x - a.x)  // RTL: right → left
-      const parts = cells.map(c => c.str.trim()).filter(Boolean)
-      if (parts.length < 2) continue
+      const cells  = byY.get(y)!.sort((a, b) => b.x - a.x)
+      const parts  = cells.map(c => c.str.trim()).filter(Boolean)
+      const joined = parts.join(' ')
+      if (!joined.trim()) continue
 
-      // Detect section number (may be reversed: "1.01" → section "10.1")
-      const sectionIdx = parts.findIndex(s =>
-        /^\d+\.\d+$/.test(s) ||
-        /^\d+\.\d+$/.test(s.split('').reverse().join(''))
-      )
+      // Find section number (e.g. "1.1", "10.2")
+      // For seller PDFs the section is stored reversed: "1.01" → section "10.1"
+      const sectionIdx = parts.findIndex(s => {
+        const normal   = /^\d+\.\d+$/.test(s)
+        const reversed = /^\d+\.\d+$/.test(s.split('').reverse().join(''))
+        return normal || reversed
+      })
       if (sectionIdx === -1) continue
 
       const rawSection = parts[sectionIdx]
-      const section = /^\d+\.\d+$/.test(rawSection)
-        ? rawSection
-        : rawSection.split('').reverse().join('')
+      const section = isSellerPdf
+        ? rawSection.split('').reverse().join('')
+        : rawSection
 
-      const rest               = parts.filter((_, i) => i !== sectionIdx)
-      const description        = fixRtl(rest[0] ?? '')
-      const location           = fixRtl(rest[1] ?? '')
-      const contractorPosition = fixRtl(rest[2] ?? '')
+      const rest = parts.filter((_, i) => i !== sectionIdx)
 
-      if (!description) continue
+      // Separate descriptive text from numeric/cost columns
+      const textParts   = rest.filter(s => !isCostOrQuantity(s))
+      const numericParts = rest.filter(s => isCostOrQuantity(s))
 
-      results.push({
-        id:                 Math.random().toString(36).slice(2),
-        section,
-        location,
-        description,
-        contractorPosition,
-        contractorStatus:   classifyContractor(contractorPosition),
-        confidence:         0.7,
-        approved:           true,
-      })
+      if (isSellerPdf) {
+        // Seller reply: columns are [location, description, contractor-position, remarks] reversed
+        const cols            = textParts
+        const location        = processText(cols[0] ?? '')
+        const description     = processText(cols[1] ?? '')
+        const contractorPos   = processText(cols[2] ?? '')
+
+        if (!description && !location) continue
+
+        results.push({
+          id:                 Math.random().toString(36).slice(2),
+          section,
+          location,
+          description:        description || location,
+          contractorPosition: contractorPos,
+          contractorStatus:   classifyContractor(contractorPos),
+          confidence:         description.length > 5 ? 0.85 : 0.5,
+          approved:           true,
+        })
+      } else {
+        // Inspection report: no contractor position; has location, description, cost
+        // Heuristic: longer text chunks are description, shorter are location
+        const sorted      = [...textParts].sort((a, b) => b.length - a.length)
+        const description = processText(sorted[0] ?? '')
+        const location    = processText(sorted[1] ?? '')
+        const estimatedCost = extractCost(numericParts)
+
+        if (!description) continue
+
+        const item: ParsedItem = {
+          id:                 Math.random().toString(36).slice(2),
+          section,
+          location,
+          description,
+          contractorPosition: '',
+          contractorStatus:   'pending',
+          confidence:         0.75,
+          approved:           true,
+        }
+        if (estimatedCost !== undefined) item.estimatedCost = estimatedCost
+        results.push(item)
+      }
     }
   }
 
