@@ -15,9 +15,10 @@ interface ProjectContextType {
 const ProjectContext = createContext<ProjectContextType | null>(null)
 
 export function ProjectProvider({ children }: { children: React.ReactNode }) {
-  const { user } = useAuth()
+  const { user, loading: authLoading } = useAuth()
+
   const [project,        setProject]        = useState<Project | null>(null)
-  const [loadingProject, setLoadingProject] = useState(true)
+  const [loadingProject, setLoadingProject] = useState(true)   // stay true until we know
   const [projectError,   setProjectError]   = useState<string | null>(null)
 
   const loadProject = async () => {
@@ -34,14 +35,20 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
       setProject(p)
     } catch (err: any) {
       console.error('ProjectContext: failed to load project', err)
-      // Don't clear an existing project on transient errors
       setProjectError(err?.message ?? 'שגיאה בטעינת הפרויקט')
     } finally {
       setLoadingProject(false)
     }
   }
 
-  useEffect(() => { loadProject() }, [user?.uid])
+  useEffect(() => {
+    // Wait for Firebase auth to fully resolve before querying Firestore.
+    // Without this guard, the context sets loadingProject=false while user
+    // is still null, creating a window where the app layout sees
+    // (user=set, project=null, loadingProject=false) and redirects to /setup.
+    if (authLoading) return
+    loadProject()
+  }, [authLoading, user?.uid])
 
   return (
     <ProjectContext.Provider value={{ project, loadingProject, projectError, refreshProject: loadProject }}>
