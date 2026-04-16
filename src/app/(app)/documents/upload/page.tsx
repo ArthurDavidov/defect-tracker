@@ -6,7 +6,8 @@ import Link from 'next/link'
 import { useProject } from '@/contexts/ProjectContext'
 import { useAuth } from '@/contexts/AuthContext'
 import { createDefect, createDocument, getNextSerialNumber } from '@/lib/firebase/firestore'
-import { ChevronRight, Upload, FileText, Check, X, AlertCircle, CheckCircle2 } from 'lucide-react'
+import { ChevronRight, Upload, FileText, Check, AlertCircle, CheckCircle2 } from 'lucide-react'
+import { parsePdfInBrowser } from '@/lib/parsers/pdfClient'
 import type { ParsedItem, DocumentType } from '@/types'
 import { DOC_TYPE_LABELS, CONTRACTOR_STATUS_LABELS, CONTRACTOR_STATUS_COLORS } from '@/types'
 
@@ -40,17 +41,28 @@ export default function UploadPage() {
     if (!file) return
     setParsing(true); setError('')
     try {
-      const form = new FormData()
-      form.append('file', file)
-      form.append('docType', docType)
-      const res = await fetch('/api/parse-document', { method: 'POST', body: form })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error ?? 'שגיאה בעיבוד הקובץ')
-      if (data.items.length === 0) throw new Error('לא נמצאו פריטים בקובץ – בדוק שהקובץ מכיל טבלה')
-      setItems(data.items)
+      let parsed: ParsedItem[] = []
+
+      if (file.name.toLowerCase().endsWith('.pdf')) {
+        // PDF parsed client-side — pdfjs-dist requires browser APIs (DOMMatrix etc.)
+        parsed = await parsePdfInBrowser(file)
+      } else if (file.name.toLowerCase().endsWith('.docx')) {
+        // DOCX parsed server-side via mammoth
+        const form = new FormData()
+        form.append('file', file)
+        const res  = await fetch('/api/parse-document', { method: 'POST', body: form })
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.error ?? 'שגיאה בעיבוד הקובץ')
+        parsed = data.items
+      } else {
+        throw new Error('סוג קובץ לא נתמך – השתמש ב-PDF או DOCX בלבד')
+      }
+
+      if (parsed.length === 0) throw new Error('לא נמצאו פריטים בקובץ – בדוק שהקובץ מכיל טבלה עם ליקויים')
+      setItems(parsed)
       setStep('review')
     } catch (err: any) {
-      setError(err.message)
+      setError(err.message ?? 'שגיאה לא ידועה')
     } finally {
       setParsing(false)
     }

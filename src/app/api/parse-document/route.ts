@@ -68,63 +68,8 @@ async function parseDocx(buffer: ArrayBuffer): Promise<ParsedItem[]> {
   return items
 }
 
-// ─── PDF parser ───────────────────────────────────────────────────────────────
-
-async function parsePdf(buffer: ArrayBuffer): Promise<ParsedItem[]> {
-  const pdfjsLib = await import('pdfjs-dist')
-  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise
-  const items: ParsedItem[] = []
-
-  for (let p = 1; p <= pdf.numPages; p++) {
-    const page    = await pdf.getPage(p)
-    const content = await page.getTextContent()
-
-    // Group text by Y coordinate (±6 pt tolerance)
-    const byY = new Map<number, { str: string; x: number }[]>()
-    for (const item of content.items as { str: string; transform: number[] }[]) {
-      const y = Math.round(item.transform[5] / 6) * 6
-      const x = item.transform[4]
-      if (!byY.has(y)) byY.set(y, [])
-      byY.get(y)!.push({ str: item.str, x })
-    }
-
-    const sortedYs = [...byY.keys()].sort((a, b) => b - a)
-
-    for (const y of sortedYs) {
-      const cells = byY.get(y)!.sort((a, b) => b.x - a.x)  // RTL: highest X first
-      const parts = cells.map(c => c.str.trim()).filter(Boolean)
-      if (parts.length < 2) continue
-
-      // Look for section number pattern
-      const sectionIdx = parts.findIndex(p => /^\d+\.\d+$/.test(p.split('').reverse().join('')) || /^\d+\.\d+$/.test(p))
-      if (sectionIdx === -1) continue
-
-      const rawSection = parts[sectionIdx]
-      const section = /^\d+\.\d+$/.test(rawSection)
-        ? rawSection
-        : rawSection.split('').reverse().join('')
-
-      const remaining = parts.filter((_, i) => i !== sectionIdx)
-      const description        = fixRtl(remaining[0] ?? '')
-      const location           = fixRtl(remaining[1] ?? '')
-      const contractorPosition = fixRtl(remaining[2] ?? '')
-
-      if (!description) continue
-
-      items.push({
-        id:                 Math.random().toString(36).slice(2),
-        section,
-        location,
-        description,
-        contractorPosition,
-        contractorStatus:   classifyContractor(contractorPosition),
-        confidence:         0.7,
-        approved:           true,
-      })
-    }
-  }
-  return items
-}
+// PDF parsing is done client-side (pdfjs-dist requires browser APIs like DOMMatrix).
+// This API route only handles DOCX.
 
 // ─── Contractor classifier ────────────────────────────────────────────────────
 import type { ContractorPositionClass } from '@/types'
@@ -153,10 +98,8 @@ export async function POST(req: NextRequest) {
 
     if (fileName.endsWith('.docx')) {
       parsedItems = await parseDocx(buffer)
-    } else if (fileName.endsWith('.pdf')) {
-      parsedItems = await parsePdf(buffer)
     } else {
-      return NextResponse.json({ error: 'סוג קובץ לא נתמך. השתמש ב-PDF או DOCX' }, { status: 400 })
+      return NextResponse.json({ error: 'API זה מעבד DOCX בלבד. PDF מעובד ישירות בדפדפן.' }, { status: 400 })
     }
 
     return NextResponse.json({ items: parsedItems, total: parsedItems.length })
