@@ -8,10 +8,14 @@ import { createProject } from '@/lib/firebase/firestore'
 import { warrantyEndDate } from '@/lib/utils'
 
 export default function RegisterPage() {
-  const { signUp, user } = useAuth()
+  const { signUp, user, loading: authLoading } = useAuth()
   const router = useRouter()
 
+  // Don't set the step until Firebase has confirmed the auth state,
+  // so we never render the wrong step even for a single frame.
   const [step, setStep] = useState<1 | 2>(1)
+  const [ready, setReady] = useState(false)
+
   const [loading, setLoading] = useState(false)
   const [error,   setError]   = useState('')
 
@@ -24,14 +28,27 @@ export default function RegisterPage() {
   const [address,      setAddress]      = useState('')
   const [deliveryDate, setDeliveryDate] = useState('')
 
-  // When Firebase auth resolves (async), jump to step 2 if already signed in
   useEffect(() => {
+    if (authLoading) return
+    // Auth is resolved: set the correct step now
     if (user) {
-      setStep(2)
       setName(user.displayName ?? '')
       setEmail(user.email ?? '')
+      setStep(2)
+    } else {
+      setStep(1)
     }
-  }, [user])
+    setReady(true)
+  }, [authLoading, user])
+
+  // Show spinner while Firebase confirms auth state
+  if (!ready) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100">
+        <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+      </div>
+    )
+  }
 
   const handleAccount = async (e: React.FormEvent) => {
     e.preventDefault()
