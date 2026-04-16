@@ -1,13 +1,18 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { useAuth } from '@/contexts/AuthContext'
 
 export default function RegisterPage() {
-  const { signUp } = useAuth()
+  const { signUp, user, loading: authLoading } = useAuth()
   const router = useRouter()
+
+  // If already authenticated, skip to apartment setup
+  useEffect(() => {
+    if (!authLoading && user) router.replace('/setup')
+  }, [authLoading, user, router])
 
   const [name,     setName]     = useState('')
   const [email,    setEmail]    = useState('')
