@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuth } from '@/contexts/AuthContext'
+import { useProject } from '@/contexts/ProjectContext'
 import { createProject } from '@/lib/firebase/firestore'
 import { warrantyEndDate } from '@/lib/utils'
 
@@ -12,6 +13,7 @@ import { warrantyEndDate } from '@/lib/utils'
  */
 export default function SetupPage() {
   const { user, loading: authLoading } = useAuth()
+  const { refreshProject } = useProject()
   const router = useRouter()
 
   const [address,      setAddress]      = useState('')
@@ -45,6 +47,7 @@ export default function SetupPage() {
         warrantyEndDate: warrantyEndDate(deliveryDate),
         members:         [{ userId: user.uid, email: user.email!, name: user.displayName || '', role: 'owner' }],
       })
+      await refreshProject()   // update context before navigating
       router.push('/dashboard')
     } catch {
       setError('שגיאה ביצירת הפרויקט – נסה שוב')
