@@ -8,6 +8,7 @@ import type { Project } from '@/types'
 interface ProjectContextType {
   project:        Project | null
   loadingProject: boolean
+  projectError:   string | null
   refreshProject: () => Promise<void>
 }
 
@@ -17,22 +18,33 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   const { user } = useAuth()
   const [project,        setProject]        = useState<Project | null>(null)
   const [loadingProject, setLoadingProject] = useState(true)
+  const [projectError,   setProjectError]   = useState<string | null>(null)
 
   const loadProject = async () => {
-    if (!user) { setProject(null); setLoadingProject(false); return }
+    if (!user) {
+      setProject(null)
+      setProjectError(null)
+      setLoadingProject(false)
+      return
+    }
     setLoadingProject(true)
+    setProjectError(null)
     try {
       const p = await getUserProject(user.uid)
       setProject(p)
+    } catch (err: any) {
+      console.error('ProjectContext: failed to load project', err)
+      // Don't clear an existing project on transient errors
+      setProjectError(err?.message ?? 'שגיאה בטעינת הפרויקט')
     } finally {
       setLoadingProject(false)
     }
   }
 
-  useEffect(() => { loadProject() }, [user])
+  useEffect(() => { loadProject() }, [user?.uid])
 
   return (
-    <ProjectContext.Provider value={{ project, loadingProject, refreshProject: loadProject }}>
+    <ProjectContext.Provider value={{ project, loadingProject, projectError, refreshProject: loadProject }}>
       {children}
     </ProjectContext.Provider>
   )

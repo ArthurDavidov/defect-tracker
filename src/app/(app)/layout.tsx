@@ -23,7 +23,7 @@ const navItems = [
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   const { user, loading, logOut } = useAuth()
-  const { project, loadingProject } = useProject()
+  const { project, loadingProject, projectError } = useProject()
   const router   = useRouter()
   const pathname = usePathname()
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -33,16 +33,33 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   }, [user, loading, router])
 
   useEffect(() => {
-    if (!loadingProject && !loading && user && !project &&
+    // Only redirect to /setup when we are certain there is no project
+    // (no error means the query succeeded and returned nothing)
+    if (!loadingProject && !loading && user && !project && !projectError &&
         pathname !== '/settings') {
       router.push('/setup')
     }
-  }, [project, loadingProject, loading, user, pathname, router])
+  }, [project, loadingProject, loading, user, projectError, pathname, router])
 
   if (loading || loadingProject) {
     return (
       <div className="flex items-center justify-center h-screen">
         <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+      </div>
+    )
+  }
+
+  if (projectError && !project) {
+    return (
+      <div className="flex flex-col items-center justify-center h-screen gap-4 p-6 text-center">
+        <p className="text-red-600 font-medium">שגיאה בטעינת הפרויקט</p>
+        <p className="text-sm text-gray-500">בדוק את חוקי ה-Firestore ב-Firebase Console</p>
+        <button
+          onClick={() => window.location.reload()}
+          className="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700"
+        >
+          נסה שוב
+        </button>
       </div>
     )
   }
