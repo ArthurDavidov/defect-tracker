@@ -10,18 +10,23 @@ import { warrantyEndDate } from '@/lib/utils'
 export default function RegisterPage() {
   const { signUp, user } = useAuth()
   const router = useRouter()
-  const [step, setStep] = useState<1 | 2>(1)
+
+  // If already signed in (e.g. via Google), skip account creation
+  const [step, setStep] = useState<1 | 2>(user ? 2 : 1)
   const [loading, setLoading] = useState(false)
   const [error,   setError]   = useState('')
 
   // Step 1 — account
-  const [name,     setName]     = useState('')
-  const [email,    setEmail]    = useState('')
+  const [name,     setName]     = useState(user?.displayName ?? '')
+  const [email,    setEmail]    = useState(user?.email ?? '')
   const [password, setPassword] = useState('')
 
   // Step 2 — apartment
   const [address,      setAddress]      = useState('')
   const [deliveryDate, setDeliveryDate] = useState('')
+
+  // Jump to step 2 as soon as Firebase confirms the user (handles Google redirect timing)
+  const effectiveStep = user ? Math.max(step, 2) as 2 : step
 
   const handleAccount = async (e: React.FormEvent) => {
     e.preventDefault()
