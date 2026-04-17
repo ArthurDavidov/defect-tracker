@@ -123,11 +123,12 @@ export async function parsePdfInBrowser(
           approved:           true,
         })
       } else {
-        // Inspection report: no contractor position; has location, description, cost
-        // Heuristic: longer text chunks are description, shorter are location
-        const sorted      = [...textParts].sort((a, b) => b.length - a.length)
-        const description = processText(sorted[0] ?? '')
-        const location    = processText(sorted[1] ?? '')
+        // Inspection report: cells are already sorted right-to-left (b.x - a.x).
+        // Column order (RTL): section | location | description | qty | cost
+        // After removing section and numerics, textParts[0]=location, textParts[1]=description.
+        // If only one text part exists, treat it as the description (no location on this row).
+        const location    = textParts.length >= 2 ? processText(textParts[0] ?? '') : ''
+        const description = processText(textParts.length >= 2 ? (textParts[1] ?? '') : (textParts[0] ?? ''))
         const estimatedCost = extractCost(numericParts)
 
         if (!description) continue
