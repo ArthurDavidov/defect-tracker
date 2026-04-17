@@ -65,11 +65,13 @@ export async function parsePdfInBrowser(
     const page    = await pdf.getPage(p)
     const content = await page.getTextContent()
 
-    // Group text items by Y coordinate (±6 pt tolerance)
+    // Group text items by Y coordinate (±10 pt tolerance).
+    // Wider tolerance than the default catches location cells that sit a few
+    // pts above/below the description text due to vertical cell alignment.
     const byY = new Map<number, { str: string; x: number }[]>()
     for (const item of content.items as { str: string; transform: number[] }[]) {
       if (!item.str.trim()) continue
-      const y = Math.round(item.transform[5] / 6) * 6
+      const y = Math.round(item.transform[5] / 10) * 10
       const x = item.transform[4]
       if (!byY.has(y)) byY.set(y, [])
       byY.get(y)!.push({ str: item.str, x })
@@ -123,12 +125,15 @@ export async function parsePdfInBrowser(
           approved:           true,
         })
       } else {
-        // Inspection report: cells are already sorted right-to-left (b.x - a.x).
-        // Column order (RTL): section | location | description | qty | cost
-        // After removing section and numerics, textParts[0]=location, textParts[1]=description.
-        // If only one text part exists, treat it as the description (no location on this row).
-        const location    = textParts.length >= 2 ? processText(textParts[0] ?? '') : ''
-        const description = processText(textParts.length >= 2 ? (textParts[1] ?? '') : (textParts[0] ?? ''))
+        // Inspection report: sort text parts by length — the longest chunk is the
+        // defect description.  Location is the next-longest chunk that is NOT a
+        // short abbreviation code (Hebrew abbreviated notes like "קומפ'", "יח'"
+        // end with an apostrophe and are only a few chars long).
+        const isCode = (s: string) => s.endsWith("'") || s.endsWith('\u05f4') || s.length <= 3
+        const sorted      = [...textParts].sort((a, b) => b.length - a.length)
+        const description = processText(sorted[0] ?? '')
+        const locationCandidate = sorted.find((s, i) => i > 0 && !isCode(s))
+        const location    = processText(locationCandidate ?? '')
         const estimatedCost = extractCost(numericParts)
 
         if (!description) continue
