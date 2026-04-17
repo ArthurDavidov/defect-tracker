@@ -6,8 +6,6 @@
 import type { ParsedItem, ContractorPositionClass, DocumentType } from '@/types'
 
 // ─── RTL correction ───────────────────────────────────────────────────────────
-// Only needed for seller PDFs whose generator stores each character reversed.
-// Inspection report PDFs are standard — pdfjs-dist already returns correct text.
 
 function fixRtl(text: string): string {
   if (!text) return ''
@@ -30,7 +28,6 @@ function classifyContractor(text: string): ContractorPositionClass {
 
 function isCostOrQuantity(s: string): boolean {
   const clean = s.replace(/[₪,\s]/g, '')
-  // Pure number (quantity like 1, 2, 3) or currency amount
   return /^\d+(\.\d+)?$/.test(clean) || s.includes('₪')
 }
 
@@ -39,6 +36,51 @@ function extractCost(parts: string[]): number | undefined {
   if (!costStr) return undefined
   const num = parseFloat(costStr.replace(/[₪,\s]/g, ''))
   return isNaN(num) ? undefined : num
+}
+
+// ─── Inspection-report column detection ──────────────────────────────────────
+
+interface ColMap { location?: number; description?: number; cost?: number }
+
+/**
+ * Scan all rows looking for the table's header row (the one that contains
+ * Hebrew column labels like "מיקום" and "ליקוי").  Returns the X coordinate
+ * of each recognised column so data rows can be assigned correctly.
+ */
+function detectColumns(
+  byY: Map<number, { str: string; x: number }[]>,
+  sortedYs: number[]
+): ColMap {
+  const PATTERNS: [keyof ColMap, RegExp][] = [
+    ['location',    /^מיקום/],
+    ['description', /^(ליקוי|תיאור|פגם|ממצא)/],
+    ['cost',        /^(עלות|מחיר|סה"כ)/],
+  ]
+
+  for (const y of sortedYs) {
+    const cells = byY.get(y)!
+    const found: ColMap = {}
+    let hits = 0
+    for (const cell of cells) {
+      const s = cell.str.trim()
+      for (const [col, re] of PATTERNS) {
+        if (re.test(s)) { found[col] = cell.x; hits++; break }
+      }
+    }
+    if (hits >= 2) return found
+  }
+  return {}
+}
+
+/** Return the column whose header X is closest to the given x value. */
+function nearestColumn(x: number, cols: ColMap): keyof ColMap | null {
+  let best: keyof ColMap | null = null
+  let bestDist = Infinity
+  for (const [col, cx] of Object.entries(cols) as [keyof ColMap, number][]) {
+    const d = Math.abs(x - cx)
+    if (d < bestDist) { bestDist = d; best = col }
+  }
+  return best
 }
 
 // ─── Main export ──────────────────────────────────────────────────────────────
@@ -56,18 +98,14 @@ export async function parsePdfInBrowser(
   const pdf     = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise
   const results: ParsedItem[] = []
 
-  // Seller reply PDFs have character-reversed Hebrew text; inspection reports do not.
   const isSellerPdf = docType === 'seller_reply'
-
   const processText = (raw: string) => isSellerPdf ? fixRtl(raw) : raw.trim()
 
   for (let p = 1; p <= pdf.numPages; p++) {
     const page    = await pdf.getPage(p)
     const content = await page.getTextContent()
 
-    // Group text items by Y coordinate (±10 pt tolerance).
-    // Wider tolerance than the default catches location cells that sit a few
-    // pts above/below the description text due to vertical cell alignment.
+    // Group text items by Y coordinate (±10 pt tolerance)
     const byY = new Map<number, { str: string; x: number }[]>()
     for (const item of content.items as { str: string; transform: number[] }[]) {
       if (!item.str.trim()) continue
@@ -79,14 +117,17 @@ export async function parsePdfInBrowser(
 
     const sortedYs = [...byY.keys()].sort((a, b) => b - a)
 
+    // Detect column layout once per page (inspection reports only)
+    const colMap    = isSellerPdf ? {} as ColMap : detectColumns(byY, sortedYs)
+    const hasColMap = !isSellerPdf && Object.keys(colMap).length >= 2
+
     for (const y of sortedYs) {
-      const cells  = byY.get(y)!.sort((a, b) => b.x - a.x)
-      const parts  = cells.map(c => c.str.trim()).filter(Boolean)
-      const joined = parts.join(' ')
-      if (!joined.trim()) continue
+      const cells      = byY.get(y)!.sort((a, b) => b.x - a.x)
+      const validCells = cells.filter(c => c.str.trim())
+      const parts      = validCells.map(c => c.str.trim())
+      if (!parts.join('').trim()) continue
 
       // Find section number (e.g. "1.1", "10.2")
-      // For seller PDFs the section is stored reversed: "1.01" → section "10.1"
       const sectionIdx = parts.findIndex(s => {
         const normal   = /^\d+\.\d+$/.test(s)
         const reversed = /^\d+\.\d+$/.test(s.split('').reverse().join(''))
@@ -95,22 +136,21 @@ export async function parsePdfInBrowser(
       if (sectionIdx === -1) continue
 
       const rawSection = parts[sectionIdx]
-      const section = isSellerPdf
+      const section    = isSellerPdf
         ? rawSection.split('').reverse().join('')
         : rawSection
 
-      const rest = parts.filter((_, i) => i !== sectionIdx)
-
-      // Separate descriptive text from numeric/cost columns
-      const textParts   = rest.filter(s => !isCostOrQuantity(s))
+      // Cells that are not the section-number cell
+      const restCells  = validCells.filter((_, i) => i !== sectionIdx)
+      const rest       = restCells.map(c => c.str.trim())
       const numericParts = rest.filter(s => isCostOrQuantity(s))
 
       if (isSellerPdf) {
-        // Seller reply: columns are [location, description, contractor-position, remarks] reversed
-        const cols            = textParts
-        const location        = processText(cols[0] ?? '')
-        const description     = processText(cols[1] ?? '')
-        const contractorPos   = processText(cols[2] ?? '')
+        // Seller reply: columns are [location, description, contractor-position, …]
+        const textParts     = rest.filter(s => !isCostOrQuantity(s))
+        const location      = processText(textParts[0] ?? '')
+        const description   = processText(textParts[1] ?? '')
+        const contractorPos = processText(textParts[2] ?? '')
 
         if (!description && !location) continue
 
@@ -125,19 +165,32 @@ export async function parsePdfInBrowser(
           approved:           true,
         })
       } else {
-        // Inspection report: sort text parts by length — the longest chunk is the
-        // defect description.  Location is the next-longest chunk that is NOT a
-        // short abbreviation code (Hebrew abbreviated notes like "קומפ'", "יח'"
-        // end with an apostrophe and are only a few chars long).
-        const isCode = (s: string) => s.endsWith("'") || s.endsWith('\u05f4') || s.length <= 3
-        const sorted      = [...textParts].sort((a, b) => b.length - a.length)
-        const description = processText(sorted[0] ?? '')
-        const locationCandidate = sorted.find((s, i) => i > 0 && !isCode(s))
-        const location    = processText(locationCandidate ?? '')
-        const estimatedCost = extractCost(numericParts)
+        // ── Inspection report ───────────────────────────────────────────────
+        let location    = ''
+        let description = ''
+
+        if (hasColMap) {
+          // Assign each non-section cell to the nearest detected column
+          for (const cell of restCells) {
+            const s = cell.str.trim()
+            if (!s || isCostOrQuantity(s)) continue
+            const col = nearestColumn(cell.x, colMap)
+            if (col === 'location')    location    = location    ? location    + ' ' + s : s
+            if (col === 'description') description = description ? description + ' ' + s : s
+          }
+        } else {
+          // Fallback when no header row found: longest chunk = description,
+          // the next chunk that looks like a room name = location
+          const textParts = rest.filter(s => !isCostOrQuantity(s))
+          const sorted    = [...textParts].sort((a, b) => b.length - a.length)
+          description     = sorted[0] ?? ''
+          const ROOM      = /חדר|מטבח|סלון|מרפסת|שירות|פרוזדור|יחידת|כניסה|גינה|מחסן|חניה|לובי|מסדרון|מבואה|אמבטיה|מקלחת/
+          location        = sorted.find((s, i) => i > 0 && ROOM.test(s) && !s.includes(':')) ?? ''
+        }
 
         if (!description) continue
 
+        const estimatedCost = extractCost(numericParts)
         const item: ParsedItem = {
           id:                 Math.random().toString(36).slice(2),
           section,
