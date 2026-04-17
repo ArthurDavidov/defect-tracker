@@ -2,10 +2,15 @@
  * Client-side PDF text extractor.
  * Must only be imported in browser components — pdfjs-dist requires DOMMatrix
  * and other browser APIs unavailable in Node.js.
+ *
+ * Supports two PDF formats:
+ *  • seller_reply  – traditional RTL table (fixed columns, reversed Hebrew)
+ *  • inspection    – "card" format: each defect is a structured card with
+ *                    "N.M ממצא" label, description text, and "מיקום" / "מחיר" rows
  */
 import type { ParsedItem, ContractorPositionClass, DocumentType } from '@/types'
 
-// ─── RTL correction ───────────────────────────────────────────────────────────
+// ─── RTL correction (seller reply only) ──────────────────────────────────────
 
 function fixRtl(text: string): string {
   if (!text) return ''
@@ -24,7 +29,7 @@ function classifyContractor(text: string): ContractorPositionClass {
   return 'pending'
 }
 
-// ─── Column classifier ────────────────────────────────────────────────────────
+// ─── Seller-reply helpers ─────────────────────────────────────────────────────
 
 function isCostOrQuantity(s: string): boolean {
   const clean = s.replace(/[₪,\s]/g, '')
@@ -38,49 +43,115 @@ function extractCost(parts: string[]): number | undefined {
   return isNaN(num) ? undefined : num
 }
 
-// ─── Inspection-report column detection ──────────────────────────────────────
+// ─── Inspection-report card parser ───────────────────────────────────────────
+//
+// Each defect card looks like (Y decreases downward in PDF coords):
+//
+//   Y=728  [x519 "1.2 ממצא"]   [x215 "description text..."]
+//   Y=712  [x505 "ממצא בדיקה"]
+//   Y=704  [x438 "תוקן חלקית"]     ← status (excluded)
+//   Y=672  [x539 "מיקום"]       [x413 "חדר רחצה הורים"]
+//   Y=656  [x533 "המלצה"]       [x293 "recommendation text"]
+//   Y=632  [x543 "מחיר"]        [x296 "₪350 (...)"]
+//
+// Right-side labels (x > 460) separate the card into zones.
 
-interface ColMap { location?: number; description?: number; cost?: number }
+type RawItem = { str: string; x: number; y: number }
 
-/**
- * Scan all rows looking for the table's header row (the one that contains
- * Hebrew column labels like "מיקום" and "ליקוי").  Returns the X coordinate
- * of each recognised column so data rows can be assigned correctly.
- */
-function detectColumns(
-  byY: Map<number, { str: string; x: number }[]>,
-  sortedYs: number[]
-): ColMap {
-  const PATTERNS: [keyof ColMap, RegExp][] = [
-    ['location',    /^מיקום/],
-    ['description', /^(ליקוי|תיאור|פגם|ממצא)/],
-    ['cost',        /^(עלות|מחיר|סה"כ)/],
-  ]
+// Matches "1.1 ממצא", "3.2 ממצא" etc.
+const MMTZA_RE = /^(\d+\.\d+)\s*ממצא/
 
-  for (const y of sortedYs) {
-    const cells = byY.get(y)!
-    const found: ColMap = {}
-    let hits = 0
-    for (const cell of cells) {
-      const s = cell.str.trim()
-      for (const [col, re] of PATTERNS) {
-        if (re.test(s)) { found[col] = cell.x; hits++; break }
+// Status / label strings that should NOT end up in the description
+const SKIP_STR = /^(ממצא בדיקה|בדיקה חוזרת|לא תוקן|תוקן|תוקן חלקית|לא בוצע|חוזרת|מיקום|המלצה|תקן|מחיר)$/
+
+function parseCardsFromPage(items: RawItem[]): ParsedItem[] {
+  const results: ParsedItem[] = []
+
+  // Find every "N.M ממצא" label on this page
+  const markers = items
+    .filter(i => MMTZA_RE.test(i.str.trim()))
+    .map(i => ({ ...i, section: i.str.trim().match(MMTZA_RE)![1] }))
+
+  if (markers.length === 0) return []
+
+  for (const mark of markers) {
+    const { y: yMark, section } = mark
+
+    // Helper: find the nearest occurrence of a label BELOW the ממצא mark
+    // (lower Y in PDF coords = lower on the page = below in reading order)
+    const labelBelow = (label: string): RawItem | undefined =>
+      items
+        .filter(i => i.str.trim() === label && i.y < yMark && i.y > yMark - 300)
+        .sort((a, b) => b.y - a.y)[0]   // closest = highest Y below yMark
+
+    const locationLabel = labelBelow('מיקום')
+    const recLabel      = labelBelow('המלצה')
+    const priceLabel    = labelBelow('מחיר')
+
+    // ── Location ──────────────────────────────────────────────────────────
+    let location = ''
+    if (locationLabel) {
+      // Value sits at the same Y as the label but to its left (lower x)
+      const val = items
+        .filter(i =>
+          Math.abs(i.y - locationLabel.y) <= 8 &&
+          i.x < locationLabel.x - 5 &&
+          i.str.trim() !== 'מיקום'
+        )
+        .sort((a, b) => b.x - a.x)[0]   // rightmost = closest to the label
+      location = val?.str.trim() ?? ''
+    }
+
+    // ── Cost ──────────────────────────────────────────────────────────────
+    let estimatedCost: number | undefined
+    if (priceLabel) {
+      const val = items
+        .filter(i =>
+          Math.abs(i.y - priceLabel.y) <= 8 &&
+          i.x < priceLabel.x &&
+          i.str.includes('₪')
+        )
+        .sort((a, b) => b.x - a.x)[0]
+      if (val) {
+        const m = val.str.match(/₪\s*([\d,]+)/)
+        if (m) estimatedCost = parseInt(m[1].replace(/,/g, ''), 10)
       }
     }
-    if (hits >= 2) return found
-  }
-  return {}
-}
 
-/** Return the column whose header X is closest to the given x value. */
-function nearestColumn(x: number, cols: ColMap): keyof ColMap | null {
-  let best: keyof ColMap | null = null
-  let bestDist = Infinity
-  for (const [col, cx] of Object.entries(cols) as [keyof ColMap, number][]) {
-    const d = Math.abs(x - cx)
-    if (d < bestDist) { bestDist = d; best = col }
+    // ── Description ───────────────────────────────────────────────────────
+    // Bottom boundary: the first label below ממצא (מיקום → המלצה → מחיר)
+    const bottomY = (locationLabel ?? recLabel ?? priceLabel)?.y ?? (yMark - 150)
+
+    const descItems = items
+      .filter(i =>
+        i.x < 460 &&               // left/centre content area (labels are at x ≥ 505)
+        i.y > bottomY + 4 &&       // above the first label row
+        i.y <= yMark + 55 &&       // no higher than ~55 pt above the ממצא mark
+        i.y < 760 &&               // exclude page running header (Y ≥ 760)
+        i.y > 30 &&                // exclude page footer (Y ≤ 30)
+        !MMTZA_RE.test(i.str) &&   // not another ממצא marker
+        !SKIP_STR.test(i.str.trim()) &&
+        !(/^\d+\.\s/.test(i.str))  // not a category header "N. Name"
+      )
+      .sort((a, b) => b.y - a.y)  // top-to-bottom reading order
+
+    const description = descItems.map(i => i.str.trim()).filter(Boolean).join(' ')
+    if (!description) continue
+
+    results.push({
+      id:                 Math.random().toString(36).slice(2),
+      section,
+      location,
+      description,
+      contractorPosition: '',
+      contractorStatus:   'pending',
+      confidence:         location ? 0.9 : 0.75,
+      approved:           true,
+      ...(estimatedCost !== undefined ? { estimatedCost } : {}),
+    })
   }
-  return best
+
+  return results
 }
 
 // ─── Main export ──────────────────────────────────────────────────────────────
@@ -105,7 +176,24 @@ export async function parsePdfInBrowser(
     const page    = await pdf.getPage(p)
     const content = await page.getTextContent()
 
-    // Group text items by Y coordinate (±10 pt tolerance)
+    if (!isSellerPdf) {
+      // ── Inspection / engineer report ────────────────────────────────────
+      // These use a card layout per defect, not a traditional table.
+      // Each card has a "N.M ממצא" marker, a description block, and label rows
+      // for מיקום (location) and מחיר (cost).
+      const rawItems = (content.items as { str: string; transform: number[] }[])
+        .filter(i => i.str.trim())
+        .map(i => ({
+          str: i.str,
+          x:   Math.round(i.transform[4]),
+          y:   Math.round(i.transform[5]),
+        }))
+
+      results.push(...parseCardsFromPage(rawItems))
+      continue
+    }
+
+    // ── Seller reply (traditional RTL table) ─────────────────────────────
     const byY = new Map<number, { str: string; x: number }[]>()
     for (const item of content.items as { str: string; transform: number[] }[]) {
       if (!item.str.trim()) continue
@@ -117,17 +205,13 @@ export async function parsePdfInBrowser(
 
     const sortedYs = [...byY.keys()].sort((a, b) => b - a)
 
-    // Detect column layout once per page (inspection reports only)
-    const colMap    = isSellerPdf ? {} as ColMap : detectColumns(byY, sortedYs)
-    const hasColMap = !isSellerPdf && Object.keys(colMap).length >= 2
-
     for (const y of sortedYs) {
       const cells      = byY.get(y)!.sort((a, b) => b.x - a.x)
       const validCells = cells.filter(c => c.str.trim())
       const parts      = validCells.map(c => c.str.trim())
       if (!parts.join('').trim()) continue
 
-      // Find section number (e.g. "1.1", "10.2")
+      // Find section number — seller PDFs store it character-reversed
       const sectionIdx = parts.findIndex(s => {
         const normal   = /^\d+\.\d+$/.test(s)
         const reversed = /^\d+\.\d+$/.test(s.split('').reverse().join(''))
@@ -136,74 +220,28 @@ export async function parsePdfInBrowser(
       if (sectionIdx === -1) continue
 
       const rawSection = parts[sectionIdx]
-      const section    = isSellerPdf
-        ? rawSection.split('').reverse().join('')
-        : rawSection
+      const section    = rawSection.split('').reverse().join('')
 
-      // Cells that are not the section-number cell
-      const restCells  = validCells.filter((_, i) => i !== sectionIdx)
-      const rest       = restCells.map(c => c.str.trim())
+      const rest         = parts.filter((_, i) => i !== sectionIdx)
+      const textParts    = rest.filter(s => !isCostOrQuantity(s))
       const numericParts = rest.filter(s => isCostOrQuantity(s))
 
-      if (isSellerPdf) {
-        // Seller reply: columns are [location, description, contractor-position, …]
-        const textParts     = rest.filter(s => !isCostOrQuantity(s))
-        const location      = processText(textParts[0] ?? '')
-        const description   = processText(textParts[1] ?? '')
-        const contractorPos = processText(textParts[2] ?? '')
+      const location      = processText(textParts[0] ?? '')
+      const description   = processText(textParts[1] ?? '')
+      const contractorPos = processText(textParts[2] ?? '')
 
-        if (!description && !location) continue
+      if (!description && !location) continue
 
-        results.push({
-          id:                 Math.random().toString(36).slice(2),
-          section,
-          location,
-          description:        description || location,
-          contractorPosition: contractorPos,
-          contractorStatus:   classifyContractor(contractorPos),
-          confidence:         description.length > 5 ? 0.85 : 0.5,
-          approved:           true,
-        })
-      } else {
-        // ── Inspection report ───────────────────────────────────────────────
-        let location    = ''
-        let description = ''
-
-        if (hasColMap) {
-          // Assign each non-section cell to the nearest detected column
-          for (const cell of restCells) {
-            const s = cell.str.trim()
-            if (!s || isCostOrQuantity(s)) continue
-            const col = nearestColumn(cell.x, colMap)
-            if (col === 'location')    location    = location    ? location    + ' ' + s : s
-            if (col === 'description') description = description ? description + ' ' + s : s
-          }
-        } else {
-          // Fallback when no header row found: longest chunk = description,
-          // the next chunk that looks like a room name = location
-          const textParts = rest.filter(s => !isCostOrQuantity(s))
-          const sorted    = [...textParts].sort((a, b) => b.length - a.length)
-          description     = sorted[0] ?? ''
-          const ROOM      = /חדר|מטבח|סלון|מרפסת|שירות|פרוזדור|יחידת|כניסה|גינה|מחסן|חניה|לובי|מסדרון|מבואה|אמבטיה|מקלחת/
-          location        = sorted.find((s, i) => i > 0 && ROOM.test(s) && !s.includes(':')) ?? ''
-        }
-
-        if (!description) continue
-
-        const estimatedCost = extractCost(numericParts)
-        const item: ParsedItem = {
-          id:                 Math.random().toString(36).slice(2),
-          section,
-          location,
-          description,
-          contractorPosition: '',
-          contractorStatus:   'pending',
-          confidence:         0.75,
-          approved:           true,
-        }
-        if (estimatedCost !== undefined) item.estimatedCost = estimatedCost
-        results.push(item)
-      }
+      results.push({
+        id:                 Math.random().toString(36).slice(2),
+        section,
+        location,
+        description:        description || location,
+        contractorPosition: contractorPos,
+        contractorStatus:   classifyContractor(contractorPos),
+        confidence:         description.length > 5 ? 0.85 : 0.5,
+        approved:           true,
+      })
     }
   }
 
